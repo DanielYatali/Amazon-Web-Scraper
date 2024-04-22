@@ -21,4 +21,4 @@ RUN pip install --no-cache-dir scrapyd
 EXPOSE 6800
 
 # Run scrapyd when the container launches
-CMD ["scrapyd"]
+CMD "scrapyd"
