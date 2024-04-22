@@ -1,0 +1,4 @@
+aiohttp==3.9.5
+itemadapter==0.8.0
+python-dotenv==1.0.1
+Scrapy==2.11.1
