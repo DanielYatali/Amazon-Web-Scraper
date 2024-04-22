@@ -15,10 +15,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install --no-cache-dir scrapyd
 
 # Optionally install scrapyd-client to deploy the spiders from the container
-# RUN pip install --no-cache-dir scrapyd-client
+RUN pip install --no-cache-dir scrapyd-client
 
-# Expose the default scrapyd port
+# Make port 6800 available to the world outside this container
 EXPOSE 6800
 
-# Run scrapyd when the container launches
-CMD "scrapyd"
+CMD echo "[scrapyd]\n\
+http_port = $PORT\n\
+bind_address = 0.0.0.0" > scrapyd.conf && \
+scrapyd
+
+# Define environment variable
+
+
