@@ -1,16 +1,57 @@
 import datetime
+import functools
 import json
 import logging
 import os
 import re
+import time
 from random import randint
 import scrapy
+from scrapy import Spider
 
+# os.environ['ENABLE_TIMING'] = 'true'
+
+def timeit(method):
+    """Decorator to measure the execution time of a method."""
+    @functools.wraps(method)
+    def wrapper(*args, **kwargs):
+        if os.getenv('ENABLE_TIMING', 'false').lower() == 'true':
+            start_time = time.time()
+            result = method(*args, **kwargs)
+            end_time = time.time()
+            duration = end_time - start_time
+            if isinstance(args[0], Spider):
+                args[0].logger.info(f"{method.__name__} took {duration:.4f} seconds")
+            else:
+                print(f"{method.__name__} took {duration:.4f} seconds")
+        else:
+            result = method(*args, **kwargs)
+        return result
+    return wrapper
+
+
+@timeit
 def datetime_serializer(obj):
     """JSON serializer for objects not serializable by default json code."""
     if isinstance(obj, datetime.datetime):
         return obj.isoformat()
     raise TypeError(f"Type {type(obj)} not serializable")
+
+
+def clean_text(text):
+    """
+    Remove unwanted unicode characters, newline characters, excessive whitespace,
+    and normalize the text for better usability.
+    """
+    # Remove Unicode LTR and RTL marks
+    text = re.sub(r'[\u200e\u200f]', '', text)
+    # Replace multiple whitespace characters including newlines and tabs with a single space
+    text = re.sub(r'\s+', ' ', text)  # This pattern includes \n, \r, \t, and regular spaces
+    text = text.replace('\\n', '')
+    text = text.replace('\\r', '')
+    text = text.replace(':', '')
+    return text.strip()
+
 
 def safe_extract(response_or_selector, queries, query_type='css', extract_first=True, default_value=None):
     """
@@ -35,11 +76,11 @@ def safe_extract(response_or_selector, queries, query_type='css', extract_first=
             if extract_first:
                 extracted = data.get()
                 if extracted is not None:
-                    return extracted.strip()
+                    return clean_text(extracted)
             else:
                 all_data = data.getall()
                 if all_data:
-                    return [element.strip() for element in all_data]
+                    return [clean_text(element) for element in all_data]
 
     # Return default value if none of the queries return data
     if not extract_first and isinstance(default_value, list):
@@ -47,15 +88,41 @@ def safe_extract(response_or_selector, queries, query_type='css', extract_first=
     return [default_value] if not extract_first else default_value
 
 
+@timeit
 def extract_table_data(response, table_selector):
     table = response.xpath(table_selector)
     data = {}
-    key_selectors = [".//th/text()"]
-    value_selectors = [".//td/text()"]
+    key_css_selectors = ["th::text"]
+    value_css_selectors = ["td::text"]
     for row in table.xpath(".//tr"):
-        key = safe_extract(row, key_selectors, query_type='xpath', extract_first=True, default_value='Unknown Spec')
-        value = safe_extract(row, value_selectors, query_type='xpath', extract_first=True,
-                             default_value='Not Available')
+        key = safe_extract(row, key_css_selectors, query_type='css', extract_first=True, default_value='Unknown Spec')
+        if key == 'Customer Reviews':
+            number_of_reviews_selectors = ['span#acrCustomerReviewText::text']
+            average_rating_selectors = ["td.a-size-base span.a-size-base.a-color-base::text"]
+            rating = safe_extract(row, average_rating_selectors, query_type='css', extract_first=True,
+                                  default_value='0.0')
+            number_of_reviews = safe_extract(row, number_of_reviews_selectors, query_type='css', extract_first=True,
+                                             default_value='0')
+            value = f"{rating} out of 5 stars ({number_of_reviews})"
+        elif key == 'Best Sellers Rank':
+            category_rank_computers_selector = ['td > span > span:first-child::text']
+            top_100_text_selector = ['td > span > span:first-child > a::text']
+            category_rank_laptops_selector = ['td > span > span:nth-child(3)::text']
+            laptops_text_selector = ['td > span > span:nth-child(3) > a::text']
+            category_rank_computers = safe_extract(row, category_rank_computers_selector, query_type='css',
+                                                   extract_first=True, default_value='Not Available')
+            top_100_text = safe_extract(row, top_100_text_selector, query_type='css', extract_first=True,
+                                        default_value='Not Available')
+            category_rank_laptops = safe_extract(row, category_rank_laptops_selector, query_type='css',
+                                                 extract_first=True, default_value='Not Available')
+            laptops_text = safe_extract(row, laptops_text_selector, query_type='css', extract_first=True,
+                                        default_value='Not Available')
+            value = f"{category_rank_computers} {top_100_text}, {category_rank_laptops} {laptops_text}"
+
+        else:
+            value = safe_extract(row, value_css_selectors, query_type='css', extract_first=True,
+                                 default_value='Not Available')
+        # check if the value contains a span tag and check if the span tag has a text else get the text of the span tag
         if key != 'Unknown Spec':
             # replace all /n and strip out excess space from the font and end of the string
             value = value.replace('\\n', '').strip()
@@ -63,6 +130,22 @@ def extract_table_data(response, table_selector):
     return data
 
 
+@timeit
+def extract_product_details(response):
+    # Some pages don't have a table for product details, but they have a list of details
+    product_details = {}
+    detail_selector = response.css('#detailBullets_feature_div > ul.detail-bullet-list > li')
+
+    for detail in detail_selector:
+        key = safe_extract(detail, ['span.a-text-bold::text'], extract_first=True, default_value='')
+        value = safe_extract(detail, ['span:nth-child(2)::text'], extract_first=True, default_value='')
+        if key and value:
+            product_details[key] = value
+
+    return product_details
+
+
+@timeit
 def get_product_specs(response):
     product_specs = {}
     # Identify the specs table by its ID
@@ -70,12 +153,17 @@ def get_product_specs(response):
     tech_specs_table1 = response.xpath("//table[@id='productDetails_techSpec_section_1']")
     tech_spec_table2 = response.xpath("//table[@id='productDetails_techSpec_section_2']")
     product_specs.update(extract_table_data(response, "//table[@id='productDetails_detailBullets_sections1']"))
-    product_specs.update(extract_table_data(response, "//table[@id='productDetails_techSpec_section_1']"))
-    product_specs.update(extract_table_data(response, "//table[@id='productDetails_techSpec_section_2']"))
+    if not product_specs:
+        product_specs.update(extract_product_details(response))
+    tech_spec_1 = (extract_table_data(response, "//table[@id='productDetails_techSpec_section_1']"))
+    tech_spec_2 = (extract_table_data(response, "//table[@id='productDetails_techSpec_section_2']"))
+    product_specs.update(tech_spec_1)
+    product_specs.update(tech_spec_2)
 
     return product_specs
 
 
+@timeit
 def get_rating(response):
     # Define a list of selectors to try for extracting the rating
     rating_selectors = [
@@ -95,6 +183,7 @@ def get_rating(response):
         return 0.0
 
 
+@timeit
 def get_image_url(response):
     # Define a list of XPath selectors to try for extracting the image URL
     image_url_selectors = [
@@ -106,47 +195,65 @@ def get_image_url(response):
     return safe_extract(response, image_url_selectors, query_type='xpath', extract_first=True, default_value='')
 
 
+@timeit
 def get_product_description(response):
-    # Define a list of XPath selectors to try for extracting the product description
-    description_selectors = [
-        "//div[@id='productDescription']/p/span/text()",  # Original selector
-        # You can add more selectors here as fallbacks or alternatives
-    ]
+    description_table_selector = '#poExpander > div > div > table'
+    description_table = response.css(description_table_selector)
 
-    # Use the updated safe_extract function with a list of selectors
-    return safe_extract(response, description_selectors, query_type='xpath', extract_first=True, default_value='')
+    rows = description_table.xpath('.//tr')
+    product_details = ''
+    for row in rows:
+        key = safe_extract(row, ['td.a-span3 > span::text'], extract_first=True, default_value='')
+        value = safe_extract(row, ['td.a-span9 > span::text'], extract_first=True, default_value='')
+
+        if key and value:
+            product_details += f"{key}: {value}\n"
+    if product_details == '':
+        book_description_selector = "div[data-a-expander-name='book_description_expander'] div[aria-expanded='false']"
+        book_description = response.css(book_description_selector)
+        spans = safe_extract(book_description, ['span::text'], query_type='css', extract_first=False, default_value=[])
+        product_details = ' '.join(spans)
+    return product_details
 
 
+@timeit
 def get_product_title(response):
-    # Define a list of CSS selectors to try for extracting the product title
     title_selectors = [
-        'span#productTitle::text',  # Original selector
-        # Additional selectors can be added here as necessary
+        '#productTitle::text',
     ]
+    return response.css(title_selectors[0]).get(default='').strip()
+    # return safe_extract(response, title_selectors, query_type='css', extract_first=True, default_value='')
 
-    # Use the updated safe_extract function with a list of selectors
-    return safe_extract(response, title_selectors, query_type='css', extract_first=True, default_value='')
 
-
+@timeit
 def get_price(response):
     # Define a list of CSS selectors to try for extracting the price
     price_selectors = [
         'span.a-price span[aria-hidden="true"]::text',  # Original selector
         'span.aok-offscreen::text',  # Alternative selector
     ]
-
     # Use the updated safe_extract function with a list of selectors
     price_str = safe_extract(response, price_selectors, query_type='css', extract_first=True, default_value='0')
-
+    # if not price_str:
+    discount = response.css('span.savingPriceOverride::text').get(default='0.0').strip()
+    # Extracting the price
+    price = response.css('span.priceToPay .a-price-whole::text').get(default='0').strip()
+    price_decimal = response.css('span.priceToPay .a-price-fraction::text').get(default='00').strip()
+    full_price = f"{price}.{price_decimal}"
+    if full_price == '0.00':
+        full_price = price_str
     try:
-        # Attempt to convert the extracted price string to a float after cleaning
-        return float(price_str.replace('$', '').replace(',', '').strip())
+        full_price = float(price_str.replace('$', '').replace(',', '').strip())
+        discount = float(discount.replace('%', '').replace(',', '').strip())
+        return full_price, discount
     except ValueError:
-        # Log an error message if the conversion fails
-        logging.error(f"Failed to convert price '{price_str}' to float.")
-        return 0.0
+        logging.error(f"Failed to convert price '{full_price}' to float.")
+        full_price = 0.0
+        discount = 0.0
+    return full_price, discount
 
 
+@timeit
 def get_features(response):
     # Define a list of XPath selectors to try for extracting the features list
     features_selectors = [
@@ -161,6 +268,14 @@ def get_features(response):
     return [feature.strip() for feature in features if feature.strip()]
 
 
+@timeit
+def get_stock(response):
+    stock_selectors = ['div#availability span::text']
+    stock = safe_extract(response, stock_selectors, query_type='css', extract_first=True, default_value='In Stock')
+    return stock
+
+
+@timeit
 def get_reviews(response, product_reviews):
     reviews_selector = 'div[data-hook="review"]'
     reviews = response.css(reviews_selector)
@@ -199,6 +314,7 @@ def get_reviews(response, product_reviews):
     return product_reviews
 
 
+@timeit
 def extract_asin_from_url(url):
     # Define the regular expression pattern to match an ASIN in the Amazon product URL
     pattern = r'/dp/([A-Z0-9]{10})'
@@ -210,6 +326,7 @@ def extract_asin_from_url(url):
     return match.group(1) if match else None
 
 
+@timeit
 def get_number_of_reviews(response):
     # First, define the selector for the parent div to narrow down the search scope
     parent_div_selector = 'div#averageCustomerReviews'
@@ -225,6 +342,7 @@ def get_number_of_reviews(response):
     return number_of_reviews
 
 
+@timeit
 def get_product_variants(response):
     variants = {}
 
@@ -276,6 +394,7 @@ def get_product_variants(response):
     return variants
 
 
+@timeit
 def get_similar_products(product_asin, response):
     first_row_selector = '._product-comparison-desktop_desktopFaceoutStyle_asin__2eMLv'
     second_row_selector = '._product-comparison-desktop_desktopFaceoutStyle_tableAttribute__2V-c2 > span.a-price'
@@ -320,6 +439,7 @@ def get_similar_products(product_asin, response):
 class AmazonSpider(scrapy.Spider):
     name = 'amazon'
 
+    @timeit
     def __init__(self, url=None, job_id=None, *args, **kwargs):
         super(AmazonSpider, self).__init__(*args, **kwargs)
         self.job = {}
@@ -346,6 +466,7 @@ class AmazonSpider(scrapy.Spider):
         proxy_url = f"http://{proxy_user_pass}@{host}:22225"
         self.proxy = proxy_url
 
+    @timeit
     def start_requests(self):
         for url in self.start_urls:
             domain = url.split('/')[2]
@@ -360,6 +481,7 @@ class AmazonSpider(scrapy.Spider):
             yield scrapy.Request(positive_reviews_url, callback=self.parse_positive_reviews,
                                  meta={'proxy': self.proxy})
 
+    @timeit
     def generate_job(self) -> dict or None:
         if self.requests_completed != self.requests_needed:
             return
@@ -370,30 +492,37 @@ class AmazonSpider(scrapy.Spider):
         for review in self.default_reviews:
             if review['author'] not in [r['author'] for r in reviews]:
                 reviews.append(review)
+        for review in reviews:
+            # we remove the author to keep anonymity
+            if 'author' in review:
+                review.pop('author', None)
         qa = self.qa
-        product = {
-            "product_id": self.product['product_id'],
-            "job_id": self.job_id,
-            "domain": self.product['domain'],
-            "title": self.product['title'],
-            "description": self.product['description'],
-            "price": self.product['price'],
-            "image_url": self.product['image_url'],
-            "specs": self.product['specs'],
-            "features": self.product['features'],
-            "rating": self.product['rating'],
-            "reviews": reviews,
-            "created_at": self.product['created_at'],
-            "updated_at": self.product['updated_at'],
-            "similar_products": self.product['similar_products'],
-            "variants": self.product['variants'],
-            "number_of_reviews": self.product['number_of_reviews'],
-            "qa": qa,
-            "generated_review": ''
-        }
+        product = self.product
+        product['reviews'] = reviews
+        product['qa'] = qa
+        # product = {
+        #     "product_id": self.product['product_id'],
+        #     "job_id": self.job_id,
+        #     "domain": self.product['domain'],
+        #     "title": self.product['title'],
+        #     "description": self.product['description'],
+        #     "price": self.product['price'],
+        #     "image_url": self.product['image_url'],
+        #     "specs": self.product['specs'],
+        #     "features": self.product['features'],
+        #     "rating": self.product['rating'],
+        #     "reviews": reviews,
+        #     "created_at": self.product['created_at'],
+        #     "updated_at": self.product['updated_at'],
+        #     "similar_products": self.product['similar_products'],
+        #     "variants": self.product['variants'],
+        #     "number_of_reviews": self.product['number_of_reviews'],
+        #     "qa": qa,
+        #     "stock": self.product['stock'],
+        #     "generated_review": ''
+        # }
 
         # merge all the reviews check the author to avoid duplicates
-
 
         job = {
             "job_id": self.job_id,
@@ -406,18 +535,20 @@ class AmazonSpider(scrapy.Spider):
         }
         return job
 
+    @timeit
     def close_job(self, response):
         # Logic to handle the response and close the job
         self.close(self, reason="Job completed successfully")
 
-    def parse(self, response):
+    @timeit
+    def parse(self, response: scrapy.http.Response):
+        selector = response.selector
         self.product = {
             "product_id": extract_asin_from_url(response.url),
             "job_id": self.job_id,
             "domain": response.url.split('/')[2],
             "title": get_product_title(response),
             "description": get_product_description(response),
-            "price": get_price(response),
             "image_url": get_image_url(response),
             "specs": get_product_specs(response),
             "features": get_features(response),
@@ -426,8 +557,10 @@ class AmazonSpider(scrapy.Spider):
             "created_at": datetime.datetime.utcnow().isoformat(),
             "updated_at": datetime.datetime.utcnow().isoformat(),
             "variants": get_product_variants(response),
+            "stock": get_stock(response),
             "generated_review": '',
         }
+        self.product['price'], self.product['discount_percentage'] = get_price(response)
         similar_products = get_similar_products(self.product["product_id"], response)
         self.product['similar_products'] = similar_products
         self.default_reviews = get_reviews(response, [])
@@ -436,8 +569,10 @@ class AmazonSpider(scrapy.Spider):
             job = self.generate_job()
             data = json.dumps(job, default=datetime_serializer)
             endpoint = os.getenv("SERVICE_URL")
-            yield scrapy.Request(url=endpoint + "/api/v1/scrapy/update", callback=self.close_job, body=data, method='POST')
+            yield scrapy.Request(url=endpoint + "/api/v1/scrapy/update", callback=self.close_job, body=data,
+                                 method='POST')
 
+    @timeit
     def parse_critical_reviews(self, response):
         critical_reviews = get_reviews(response, [])
         self.critical_reviews = critical_reviews
@@ -446,8 +581,10 @@ class AmazonSpider(scrapy.Spider):
             job = self.generate_job()
             data = json.dumps(job, default=datetime_serializer)
             endpoint = os.getenv("SERVICE_URL")
-            yield scrapy.Request(url=endpoint + "/api/v1/scrapy/update", callback=self.close_job, body=data, method='POST')
+            yield scrapy.Request(url=endpoint + "/api/v1/scrapy/update", callback=self.close_job, body=data,
+                                 method='POST')
 
+    @timeit
     def parse_positive_reviews(self, response):
         positive_reviews = get_reviews(response, [])
         self.positive_reviews = positive_reviews
@@ -456,8 +593,10 @@ class AmazonSpider(scrapy.Spider):
             job = self.generate_job()
             data = json.dumps(job, default=datetime_serializer)
             endpoint = os.getenv("SERVICE_URL")
-            yield scrapy.Request(url=endpoint + "/api/v1/scrapy/update", callback=self.close_job, body=data, method='POST')
+            yield scrapy.Request(url=endpoint + "/api/v1/scrapy/update", callback=self.close_job, body=data,
+                                 method='POST')
 
+    @timeit
     def extract_questions_and_answers(self, response):
         qa_pairs = []
 
@@ -495,4 +634,5 @@ class AmazonSpider(scrapy.Spider):
             job = self.generate_job()
             data = json.dumps(job, default=datetime_serializer)
             endpoint = os.getenv("SERVICE_URL")
-            yield scrapy.Request(url=endpoint + "/api/v1/scrapy/update", callback=self.close_job, body=data, method='POST')
+            yield scrapy.Request(url=endpoint + "/api/v1/scrapy/update", callback=self.close_job, body=data,
+                                 method='POST')

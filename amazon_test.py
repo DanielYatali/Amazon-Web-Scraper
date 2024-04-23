@@ -12,7 +12,7 @@ class AmazonSpiderTest(unittest.TestCase):
 
     def test_spider(self):
         self.crawler_process.crawl(AmazonSpider,
-                                   url='https://www.amazon.com/dp/B07K8WHH5J',
+                                   url='https://www.amazon.com/dp/B0CRDDWTX3',
                                    job_id='123')
         self.crawler_process.start()
 

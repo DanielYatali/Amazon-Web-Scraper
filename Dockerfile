@@ -8,7 +8,9 @@ WORKDIR /app
 COPY requirements.txt /app/
 
 # Copy the current directory contents into the container at /usr/src/app
-COPY . .
+COPY default /app/default
+
+
 
 # Install Scrapyd
 RUN pip install --no-cache-dir -r requirements.txt
