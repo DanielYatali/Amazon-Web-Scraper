@@ -49,7 +49,6 @@ def clean_text(text):
     text = re.sub(r'\s+', ' ', text)  # This pattern includes \n, \r, \t, and regular spaces
     text = text.replace('\\n', '')
     text = text.replace('\\r', '')
-    text = text.replace(':', '')
     return text.strip()
 
 
@@ -138,6 +137,8 @@ def extract_product_details(response):
 
     for detail in detail_selector:
         key = safe_extract(detail, ['span.a-text-bold::text'], extract_first=True, default_value='')
+        if key:
+            key = key.replace(':', '').strip()
         value = safe_extract(detail, ['span:nth-child(2)::text'], extract_first=True, default_value='')
         if key and value:
             product_details[key] = value
