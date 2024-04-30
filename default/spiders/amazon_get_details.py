@@ -9,10 +9,12 @@ from random import randint
 import scrapy
 from scrapy import Spider
 
+
 # os.environ['ENABLE_TIMING'] = 'true'
 
 def timeit(method):
     """Decorator to measure the execution time of a method."""
+
     @functools.wraps(method)
     def wrapper(*args, **kwargs):
         if os.getenv('ENABLE_TIMING', 'false').lower() == 'true':
@@ -27,6 +29,7 @@ def timeit(method):
         else:
             result = method(*args, **kwargs)
         return result
+
     return wrapper
 
 
@@ -395,67 +398,25 @@ def get_product_variants(response):
     return variants
 
 
-@timeit
-def get_similar_products(product_asin, response):
-    first_row_selector = '._product-comparison-desktop_desktopFaceoutStyle_asin__2eMLv'
-    second_row_selector = '._product-comparison-desktop_desktopFaceoutStyle_tableAttribute__2V-c2 > span.a-price'
-
-    first_row = response.css(first_row_selector)
-    second_row = response.css(second_row_selector)
-
-    title_selectors = ['img::attr(alt)']
-    image_selectors = ['img::attr(src)']
-    price_selectors = ['span.a-offscreen::text']
-
-    products = []
-    for prod in first_row:
-        asin = prod.css('div.a-image-container::attr(id)').re_first(r'B0[A-Z0-9]+')
-        product = {
-            'title': safe_extract(prod, title_selectors, query_type='css', extract_first=True, default_value=''),
-            'image': safe_extract(prod, image_selectors, query_type='css', extract_first=True, default_value=''),
-            'asin': asin,
-            'url': f'https://www.amazon.com/dp/{asin}'
-        }
-        products.append(product)
-
-    prices = []
-    for prod in second_row:
-        prices.append(safe_extract(prod, price_selectors, query_type='css', extract_first=True, default_value=''))
-
-    # Ensure the lengths of products and prices match by removing excess products
-    if len(prices) != len(products):
-        while len(prices) != len(products):
-            products.pop(0)
-
-    # Assign prices to products
-    for i, prod in enumerate(products):
-        prod['price'] = prices[i]
-
-    # Remove the product that matches the input ASIN
-    products = [prod for prod in products if prod['asin'] != product_asin]
-
-    return products
-
-
-class AmazonSpider(scrapy.Spider):
-    name = 'amazon'
+class AmazonGetDetailsSpider(scrapy.Spider):
+    name = 'amazon_get_details'
 
     @timeit
     def __init__(self, url=None, job_id=None, *args, **kwargs):
-        super(AmazonSpider, self).__init__(*args, **kwargs)
+        super(AmazonGetDetailsSpider, self).__init__(*args, **kwargs)
         self.job = {}
         if not url or not job_id:
             logging.error("URL and Job ID are required")
             raise ValueError("URL and Job ID are required")
-        self.start_urls = [url]  # This should be the URL you intend to scrape
+        url = json.loads(url)
+        if not isinstance(url, list):
+            url = [url]
+        self.start_urls = url  # This should be the URL you intend to scrape
         self.job_id = job_id
-        self.critical_reviews = []
-        self.positive_reviews = []
         self.default_reviews = []
         self.requests_completed = 0
-        self.requests_needed = 4
-        self.product = {}
-        self.qa = []
+        self.requests_needed = len(self.start_urls)
+        self.products = []
         username = os.getenv("BRIGHT_DATA_USERNAME")
         password = os.getenv("BRIGHT_DATA_PASSWORD")
         host = os.getenv("BRIGHT_DATA_HOST")
@@ -470,48 +431,8 @@ class AmazonSpider(scrapy.Spider):
     @timeit
     def start_requests(self):
         for url in self.start_urls:
-            domain = url.split('/')[2]
-            product_id = extract_asin_from_url(url)
-            critical_reviews_url = f"https://{domain}/product-reviews/{product_id}/?filterByStar=critical&reviewerType=avp_only_reviews"
-            positive_reviews_url = f"https://{domain}/product-reviews/{product_id}/?filterByStar=positive&reviewerType=avp_only_reviews"
-            qa_url = f"https://{domain}/ask/questions/asin/{product_id}"
-            yield scrapy.Request(qa_url, callback=self.extract_questions_and_answers, meta={'proxy': self.proxy})
             yield scrapy.Request(url, callback=self.parse, meta={'proxy': self.proxy})
-            yield scrapy.Request(critical_reviews_url, callback=self.parse_critical_reviews,
-                                 meta={'proxy': self.proxy})
-            yield scrapy.Request(positive_reviews_url, callback=self.parse_positive_reviews,
-                                 meta={'proxy': self.proxy})
 
-    @timeit
-    def generate_job(self) -> dict or None:
-        if self.requests_completed != self.requests_needed:
-            return
-        reviews = self.critical_reviews
-        for review in self.positive_reviews:
-            if review['author'] not in [r['author'] for r in reviews]:
-                reviews.append(review)
-        for review in self.default_reviews:
-            if review['author'] not in [r['author'] for r in reviews]:
-                reviews.append(review)
-        for review in reviews:
-            # we remove the author to keep anonymity
-            if 'author' in review:
-                review.pop('author', None)
-        qa = self.qa
-        product = self.product
-        product['reviews'] = reviews
-        product['qa'] = qa
-
-        job = {
-            "job_id": self.job_id,
-            "status": "completed",
-            "end_time": datetime.datetime.utcnow().isoformat(),
-            "start_time": datetime.datetime.utcnow().isoformat(),
-            "result": [product],
-            "url": self.start_urls[0],
-            "error": {}
-        }
-        return job
 
     @timeit
     def close_job(self, response):
@@ -521,7 +442,7 @@ class AmazonSpider(scrapy.Spider):
     @timeit
     def parse(self, response: scrapy.http.Response):
         selector = response.selector
-        self.product = {
+        product = {
             "product_id": extract_asin_from_url(response.url),
             "job_id": self.job_id,
             "domain": response.url.split('/')[2],
@@ -538,78 +459,19 @@ class AmazonSpider(scrapy.Spider):
             "stock": get_stock(response),
             "generated_review": '',
         }
-        self.product['price'], self.product['discount_percentage'] = get_price(response)
-        similar_products = get_similar_products(self.product["product_id"], response)
-        self.product['similar_products'] = similar_products
-        self.default_reviews = get_reviews(response, [])
+        product['price'], product['discount_percentage'] = get_price(response)
+        product['reviews'] = get_reviews(response, [])
+        self.products.append(product)
         self.requests_completed += 1
         if self.requests_completed == self.requests_needed:
-            job = self.generate_job()
-            data = json.dumps(job, default=datetime_serializer)
-            endpoint = os.getenv("SERVICE_URL")
-            yield scrapy.Request(url=endpoint + "/api/v1/scrapy/update", callback=self.close_job, body=data,
-                                 method='POST')
-
-    @timeit
-    def parse_critical_reviews(self, response):
-        critical_reviews = get_reviews(response, [])
-        self.critical_reviews = critical_reviews
-        self.requests_completed += 1
-        if self.requests_completed == self.requests_needed:
-            job = self.generate_job()
-            data = json.dumps(job, default=datetime_serializer)
-            endpoint = os.getenv("SERVICE_URL")
-            yield scrapy.Request(url=endpoint + "/api/v1/scrapy/update", callback=self.close_job, body=data,
-                                 method='POST')
-
-    @timeit
-    def parse_positive_reviews(self, response):
-        positive_reviews = get_reviews(response, [])
-        self.positive_reviews = positive_reviews
-        self.requests_completed += 1
-        if self.requests_completed == self.requests_needed:
-            job = self.generate_job()
-            data = json.dumps(job, default=datetime_serializer)
-            endpoint = os.getenv("SERVICE_URL")
-            yield scrapy.Request(url=endpoint + "/api/v1/scrapy/update", callback=self.close_job, body=data,
-                                 method='POST')
-
-    @timeit
-    def extract_questions_and_answers(self, response):
-        qa_pairs = []
-
-        # Select elements with an id containing 'question'
-        question_elements = response.xpath("//*[contains(@id, 'question')]")
-
-        for question_element in question_elements:
-            # Using safe_extract to get the question text
-            question_selectors = ['div > div > a > span::text']
-            question_text = safe_extract(question_element, question_selectors, query_type='css', extract_first=True,
-                                         default_value='')
-            if question_text:
-                question_text = question_text.replace('\\n', '').strip()
-
-            # Finding the sibling div that likely contains the answer
-            sibling_div = question_element.xpath("following-sibling::div")
-
-            # Using safe_extract to get potential answer texts, then choosing the second one if available
-            answer_selectors = ["div > span::text"]
-            answer_texts = safe_extract(sibling_div, answer_selectors, query_type='css', extract_first=False,
-                                        default_value=[])
-
-            answer_text = answer_texts[1] if len(answer_texts) > 1 else ''
-            if answer_text:
-                answer_text = answer_text.replace('\\n', '').strip()
-
-            if question_text and answer_text:
-                qa_pairs.append({'question': question_text, 'answer': answer_text})
-                answer_text = ''
-                question_text = ''
-
-        self.qa = qa_pairs
-        self.requests_completed += 1
-        if self.requests_completed == self.requests_needed:
-            job = self.generate_job()
+            job = {
+                "job_id": self.job_id,
+                "status": "completed",
+                "end_time": datetime.datetime.utcnow().isoformat(),
+                "result": self.products,
+                "url": json.dumps(self.start_urls),
+                "error": {}
+            }
             data = json.dumps(job, default=datetime_serializer)
             endpoint = os.getenv("SERVICE_URL")
             yield scrapy.Request(url=endpoint + "/api/v1/scrapy/update", callback=self.close_job, body=data,
