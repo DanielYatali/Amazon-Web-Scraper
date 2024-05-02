@@ -9,6 +9,7 @@ COPY requirements.txt /app/
 
 # Copy the current directory contents into the container at /usr/src/app
 COPY default /app/default
+COPY default /app/scrapy.cfg
 
 
 
