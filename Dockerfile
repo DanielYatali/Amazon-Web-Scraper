@@ -9,7 +9,7 @@ COPY requirements.txt /app/
 
 # Copy the current directory contents into the container at /usr/src/app
 COPY default /app/default
-COPY default /app/scrapy.cfg
+COPY scrapy.cfg /app/scrapy.cfg
 
 
 
@@ -26,6 +26,5 @@ http_port = $PORT\n\
 bind_address = 0.0.0.0" > scrapyd.conf && \
 scrapyd
 
-# Define environment variable
 
 
